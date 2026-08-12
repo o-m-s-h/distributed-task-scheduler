@@ -1,5 +1,5 @@
 import pool from "../config/db.js";
-import { processTask } from "../worker/worker.js";
+import redis from "../config/redis.js";
 
 const checkForTasks = async () => {
     try {
@@ -18,15 +18,35 @@ const checkForTasks = async () => {
 
         const task = result.rows[0];
 
-        console.log(`Task found: ${task.name}`);
+        // Claim the task
+        const updateResult = await pool.query(
+            `UPDATE tasks
+             SET status = 'QUEUED',
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE id = $1
+             AND status = 'SCHEDULED'
+             RETURNING *`,
+            [task.id]
+        );
 
-        await processTask(task);
+        // Another process may have already claimed it
+        if (updateResult.rows.length === 0) {
+            return;
+        }
+
+        const queuedTask = updateResult.rows[0];
+
+        await redis.rpush(
+            "task_queue",
+            JSON.stringify(queuedTask)
+        );
+
+        console.log(`Task queued: ${queuedTask.name}`);
 
     } catch (error) {
         console.error("Scheduler error:", error);
     }
 };
-
 
 export const startScheduler = () => {
     console.log("Scheduler started");

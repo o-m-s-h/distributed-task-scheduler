@@ -1,32 +1,33 @@
 import pool from "../config/db.js";
+import redis from "../config/redis.js";
 
 const executeTask = async (task) => {
     console.log(`Executing task: ${task.name}`);
 
-    // Simulate some work
+    // Simulate work
     await new Promise((resolve) => setTimeout(resolve, 3000));
 
-    console.log(`Task completed: ${task.name}`);
+    console.log(`Finished work for: ${task.name}`);
 };
 
 
-export const processTask = async (task) => {
+const processTask = async (task) => {
     try {
-        // Mark task as RUNNING
         await pool.query(
             `UPDATE tasks
              SET status = 'RUNNING',
                  updated_at = CURRENT_TIMESTAMP
-             WHERE id = $1`,
+             WHERE id = $1
+             AND status = 'QUEUED'`,
             [task.id]
         );
 
-        console.log(`Task ${task.id} is now RUNNING`);
+        console.log(
+            `Task ${task.id} is now RUNNING`
+        );
 
-        // Execute the actual task
         await executeTask(task);
 
-        // Mark task as COMPLETED
         await pool.query(
             `UPDATE tasks
              SET status = 'COMPLETED',
@@ -35,10 +36,15 @@ export const processTask = async (task) => {
             [task.id]
         );
 
-        console.log(`Task ${task.id} is COMPLETED`);
+        console.log(
+            `Task ${task.id} is COMPLETED`
+        );
 
     } catch (error) {
-        console.error(`Task ${task.id} failed:`, error);
+        console.error(
+            `Task ${task.id} failed:`,
+            error
+        );
 
         await pool.query(
             `UPDATE tasks
@@ -49,3 +55,30 @@ export const processTask = async (task) => {
         );
     }
 };
+
+
+const startWorker = async () => {
+    console.log("Worker started");
+
+    while (true) {
+        try {
+            const result = await redis.blpop(
+                "task_queue",
+                0
+            );
+
+            const task = JSON.parse(result[1]);
+
+            console.log(
+                `Worker received task: ${task.name}`
+            );
+
+            await processTask(task);
+
+        } catch (error) {
+            console.error("Worker error:", error);
+        }
+    }
+};
+
+startWorker();
