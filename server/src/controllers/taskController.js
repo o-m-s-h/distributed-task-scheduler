@@ -1,4 +1,5 @@
 import crypto from "crypto";
+import { validateTask } from "../worker/taskHandlers.js";
 
 import {
     createTask,
@@ -21,6 +22,15 @@ export const addTask = async (req, res) => {
             return res.status(400).json({
                 message: "Name, type and scheduledAt are required"
             });
+        }
+
+        try {
+            validateTask(type, payload ?? {});
+            if (typeof scheduledAt !== "string" || !Number.isFinite(Date.parse(scheduledAt))) {
+                throw new Error("scheduledAt must be a valid date-time string");
+            }
+        } catch (error) {
+            return res.status(400).json({ message: error.message });
         }
 
         const task = await createTask({
