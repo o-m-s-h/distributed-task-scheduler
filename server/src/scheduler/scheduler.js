@@ -11,7 +11,9 @@ export const startScheduler = () => {
     const tick = async () => {
         try {
             await store.recoverExpired();
+            await store.materializeRecurring();
             await dispatchTasks(store, redis);
+            await pool.query("DELETE FROM api_rate_limits WHERE reset_at < CURRENT_TIMESTAMP");
         } catch (error) {
             console.error("Scheduler error:", error.message);
         } finally {

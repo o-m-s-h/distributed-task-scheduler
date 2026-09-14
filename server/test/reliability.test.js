@@ -8,11 +8,14 @@ import "dotenv/config";
 import { createTaskStore } from "../src/models/taskStore.js";
 import { dispatchTasks } from "../src/scheduler/dispatch.js";
 import { executeTask } from "../src/worker/taskHandlers.js";
+import { createTask, cancelTask } from "../src/models/taskModel.js";
+import { parseTaskInput } from "../src/controllers/taskInput.js";
 
 let db, store, cleanup;
 const userId = randomUUID();
 before(async () => {
-    const schemaSql = await readFile(new URL("../migrations/001_v3.sql", import.meta.url), "utf8");
+    const schemaSql = (await Promise.all(["001_v3.sql", "002_v4.sql", "003_v5.sql"].map((name) =>
+        readFile(new URL(`../migrations/${name}`, import.meta.url), "utf8")))).join("\n");
     if (process.env.TEST_POSTGRES === "1") {
         const config = { user: process.env.DB_USER, host: process.env.DB_HOST,
             database: process.env.DB_NAME, password: process.env.DB_PASSWORD,
@@ -31,10 +34,12 @@ before(async () => {
         await db.query(schemaSql); // The migration is safe to rerun.
     } else {
         const engine = new PGlite();
-        db = { query: async (sql, params) => {
-            const result = await engine.query(sql, params);
+        const adapter = (connection) => ({ query: async (sql, params) => {
+            const result = await connection.query(sql, params);
             return { ...result, rowCount: result.affectedRows };
-        } };
+        } });
+        db = { ...adapter(engine), transaction: (work) =>
+            engine.transaction((transaction) => work(adapter(transaction))) };
         cleanup = () => engine.close();
         await engine.exec(schemaSql);
         await engine.exec(schemaSql);
@@ -43,7 +48,11 @@ before(async () => {
     await db.query("INSERT INTO users(id,name,email,password) VALUES ($1,'Test','v3@example.test','unused')", [userId]);
 });
 after(async () => { await cleanup?.(); });
-beforeEach(async () => { await db.query("DELETE FROM tasks"); });
+beforeEach(async () => {
+    await db.query("DELETE FROM tasks");
+    await db.query("DELETE FROM task_schedules");
+    await db.query("UPDATE scheduler_limits SET global_limit=10,per_user_limit=3 WHERE id=1");
+});
 
 const insertTask = async () => {
     const id = randomUUID();
@@ -150,4 +159,85 @@ test("legacy queued tasks that exhausted attempts terminate instead of staying s
     await store.recoverExpired();
     assert.equal((await readTask(id)).status, "DEAD");
     assert.equal((await dispatch()).length, 0);
+});
+
+test("priority dispatch uses HIGH, MEDIUM, LOW lists in that order", async () => {
+    for (const priority of ["LOW", "HIGH", "MEDIUM"]) {
+        const id = await insertTask();
+        await db.query("UPDATE tasks SET priority=$2 WHERE id=$1", [id, priority]);
+    }
+    const queues = [];
+    await dispatchTasks(store, { rpush: async (key) => queues.push(key) });
+    assert.deepEqual(queues, ["task_queue:HIGH", "task_queue:MEDIUM", "task_queue:LOW"]);
+});
+
+test("concurrent claims respect global and per-user capacity without spending attempts", async () => {
+    await db.query("UPDATE scheduler_limits SET global_limit=1,per_user_limit=1 WHERE id=1");
+    await insertTask();
+    await insertTask();
+    const messages = await dispatch();
+    const claims = await Promise.all(messages.map((message) => store.claim(message)));
+    assert.equal(claims.filter(Boolean).length, 1);
+    const waiting = messages.find((message) => message.id !== claims.find(Boolean).id);
+    assert.equal((await readTask(waiting.id)).attempts, 0);
+    await store.complete(claims.find(Boolean), { sum: 6 });
+    assert.ok(await store.claim(waiting));
+});
+
+test("running cancellation blocks completion and retains capacity until acknowledged", async () => {
+    const id = await insertTask();
+    const [message] = await dispatch();
+    const task = await store.claim(message);
+    await cancelTask(id, userId, "TASK", db);
+    assert.equal((await readTask(id)).status, "RUNNING");
+    assert.equal(await store.heartbeat(task), false);
+    assert.equal(await store.complete(task, {}), false);
+    assert.equal(await store.fail(task, new Error("late")), false);
+    assert.equal(await store.acknowledgeCancellation(task), true);
+    assert.equal((await readTask(id)).status, "CANCELLED");
+});
+
+test("idempotent recurring creation and series cancellation are atomic", async () => {
+    const input = parseTaskInput({ name: "Recurring", type: "SUM", payload: { numbers: [1, 2] },
+        scheduledAt: "2020-01-01T00:00:00Z", recurrence: { intervalSeconds: 60 } }, "same-key");
+    const make = () => createTask({ ...input, id: randomUUID(), userId }, db);
+    const results = await Promise.all([make(), make()]);
+    assert.equal(results[0].task.id, results[1].task.id);
+    assert.equal(results.filter((result) => result.replayed).length, 1);
+    await assert.rejects(createTask({ ...input, requestHash: "different", id: randomUUID(), userId }, db),
+        (error) => error.status === 409);
+    assert.equal(await store.materializeRecurring(), 1);
+    assert.equal(await store.materializeRecurring(), 0);
+    assert.equal((await db.query("SELECT COUNT(*)::integer AS n FROM tasks")).rows[0].n, 2);
+    await cancelTask(results[0].task.id, userId, "SERIES", db);
+    assert.equal((await db.query("SELECT active FROM task_schedules")).rows[0].active, false);
+    assert.ok((await db.query("SELECT status FROM tasks")).rows.every((row) => row.status === "CANCELLED"));
+    assert.equal(await store.materializeRecurring(), 0);
+});
+
+test("V5 records transitions and measured duration without recording lease heartbeats", async () => {
+    const id = await insertTask();
+    const [message] = await dispatch();
+    const task = await store.claim(message);
+    await store.heartbeat(task);
+    await store.heartbeat(task);
+    assert.equal(await store.complete(task, { sum: 6 }), true);
+    const events = (await db.query("SELECT * FROM task_events WHERE task_id=$1 ORDER BY id", [id])).rows;
+    assert.deepEqual(events.map((event) => event.status), ["SCHEDULED", "QUEUED", "RUNNING", "COMPLETED"]);
+    assert.ok(events.at(-1).duration_ms >= 0);
+    const recorded = await readTask(id);
+    assert.ok(recorded.started_at);
+    assert.ok(recorded.finished_at);
+    assert.ok(recorded.execution_ms >= 0);
+});
+
+test("V5 cancellation requests and acknowledgement both appear in history", async () => {
+    const id = await insertTask();
+    const [message] = await dispatch();
+    const task = await store.claim(message);
+    await cancelTask(id, userId, "TASK", db);
+    await store.acknowledgeCancellation(task);
+    const events = (await db.query("SELECT * FROM task_events WHERE task_id=$1 ORDER BY id", [id])).rows;
+    assert.equal(events.at(-2).message, "Cancellation requested");
+    assert.equal(events.at(-1).status, "CANCELLED");
 });

@@ -1,54 +1,37 @@
 import crypto from "crypto";
-import { validateTask } from "../worker/taskHandlers.js";
+import { parseTaskInput } from "./taskInput.js";
 
 import {
     createTask,
     getTasksByUser,
-    getTaskById
+    getTaskById,
+    cancelTask
 } from "../models/taskModel.js";
 
 
 export const addTask = async (req, res) => {
     try {
-        const {
-            name,
-            type,
-            payload,
-            priority,
-            scheduledAt
-        } = req.body;
-
-        if (!name || !type || !scheduledAt) {
-            return res.status(400).json({
-                message: "Name, type and scheduledAt are required"
-            });
-        }
-
+        let input;
         try {
-            validateTask(type, payload ?? {});
-            if (typeof scheduledAt !== "string" || !Number.isFinite(Date.parse(scheduledAt))) {
-                throw new Error("scheduledAt must be a valid date-time string");
-            }
+            input = parseTaskInput(req.body, req.get("Idempotency-Key"));
         } catch (error) {
             return res.status(400).json({ message: error.message });
         }
 
-        const task = await createTask({
+        const { task, replayed } = await createTask({
+            ...input,
             id: crypto.randomUUID(),
-            userId: req.userId,
-            name,
-            type,
-            payload: payload || {},
-            priority: priority || "MEDIUM",
-            scheduledAt
+            userId: req.userId
         });
 
-        res.status(201).json({
-            message: "Task scheduled successfully",
+        res.status(replayed ? 200 : 201).json({
+            message: replayed ? "Existing task returned" : "Task scheduled successfully",
+            replayed,
             task
         });
 
     } catch (error) {
+        if (error.status) return res.status(error.status).json({ message: error.message });
         console.error("Create task error:", error);
 
         res.status(500).json({
@@ -99,5 +82,22 @@ export const getTask = async (req, res) => {
         res.status(500).json({
             message: "Server error"
         });
+    }
+};
+
+export const cancel = async (req, res) => {
+    try {
+        const scope = req.body?.scope ?? "TASK";
+        if (!["TASK", "SERIES"].includes(scope)) {
+            return res.status(400).json({ message: "scope must be TASK or SERIES" });
+        }
+        const result = await cancelTask(req.params.id, req.userId, scope);
+        if (!result) return res.status(404).json({ message: "Task not found" });
+        const pending = result.task.status === "RUNNING" && result.task.cancel_requested_at;
+        return res.status(pending ? 202 : 200).json(result);
+    } catch (error) {
+        if (error.status) return res.status(error.status).json({ message: error.message });
+        console.error("Cancel task error:", error);
+        return res.status(500).json({ message: "Server error" });
     }
 };

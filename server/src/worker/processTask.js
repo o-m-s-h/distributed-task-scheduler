@@ -41,5 +41,7 @@ export const processTask = async (store, message, execute = executeTask, heartbe
         stopped = true;
         clearTimeout(timer);
         await pendingHeartbeat;
+        // Keep a running cancellation in the concurrency count until work stops.
+        await store.acknowledgeCancellation?.(task);
     }
 };
