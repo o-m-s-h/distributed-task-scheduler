@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Task Scheduler</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header><h1>Task Scheduler</h1><button id="logout" hidden>Log out</button></header>
+  <main>
+    <section id="auth" class="panel auth">
+      <h2 id="auth-title">Log in</h2>
+      <p>Manage tasks and monitor their execution.</p>
+      <form id="auth-form">
+        <label id="name-field" hidden>Name<input id="auth-name" maxlength="255" autocomplete="name"></label>
+        <label>Email<input id="email" type="email" required autocomplete="username"></label>
+        <label>Password<input id="password" type="password" required autocomplete="current-password"></label>
+        <button id="auth-submit" type="submit">Log in</button>
+      </form>
+      <p id="auth-message" role="status"></p>
+      <button id="switch-auth" class="secondary">Create an account</button>
+    </section>
+
+    <div id="dashboard" hidden>
+      <div class="toolbar"><div><h2>Overview</h2><p>Your tasks · shared worker infrastructure</p></div><button id="refresh">Refresh</button></div>
+      <p id="status" role="status">Loading…</p>
+      <section id="metrics" class="metrics" aria-label="Task metrics"></section>
+      <p class="muted">Pending = scheduled + queued. Failed = exhausted attempts (DEAD). Rates use completed + failed tasks, excluding cancellations. Duration averages measured attempts since V5.</p>
+      <section class="panel"><h2>Queue and workers</h2><p id="queue"></p>
+        <p class="muted">Redis queue depth is shared across all users and can include duplicate or stale delivery messages. Worker health becomes OFFLINE after 20 seconds without a heartbeat.</p>
+        <div class="scroll"><table><thead><tr><th>Worker</th><th>Health</th><th>Slots</th><th>Your running tasks</th><th>Last seen</th></tr></thead><tbody id="workers"></tbody></table></div>
+      </section>
+      <details class="panel"><summary>Create a task</summary>
+        <form id="task-form" class="task-form">
+          <label>Name<input id="task-name" required maxlength="255" value="Sum calculation"></label>
+          <label>Type<select id="task-type"><option>SUM</option><option>SHA256</option></select></label>
+          <label>Priority<select id="priority"><option>MEDIUM</option><option>HIGH</option><option>LOW</option></select></label>
+          <label>Schedule (your local time; blank = now)<input id="scheduled" type="datetime-local"></label>
+          <label>Repeat every N seconds (blank = once)<input id="recurrence" type="number" min="60" max="31536000"></label>
+          <label>Idempotency key (optional)<input id="idempotency" maxlength="200"></label>
+          <label class="wide">Payload JSON<textarea id="payload" rows="3" required>{"numbers":[10,20,30],"delayMs":10000}</textarea></label>
+          <button id="create-task" type="submit">Create task</button><p id="task-message" role="status"></p>
+        </form>
+      </details>
+      <section class="panel"><h2>Your tasks</h2>
+        <div class="scroll"><table><thead><tr><th>Name</th><th>Status</th><th>Priority</th><th>Scheduled</th><th>Attempts</th><th>Last duration</th><th>Actions</th></tr></thead><tbody id="tasks"></tbody></table></div>
+        <div class="pagination"><button id="previous">Previous</button><span id="page"></span><button id="next">Next</button></div>
+      </section>
+      <section class="panel"><h2>Recent task logs</h2><p class="muted">Latest 50 state changes for your tasks. Open a task for its history and result.</p><div id="logs"></div></section>
+    </div>
+  </main>
+  <dialog id="detail"><div class="toolbar"><h2>Task details</h2><button id="close-detail">Close</button></div><button id="refresh-detail">Refresh details</button><p id="detail-message" role="status"></p><pre id="detail-task"></pre><h3>History (latest 100 events)</h3><div id="detail-history"></div></dialog>
+</body>
+</html>
